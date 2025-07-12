@@ -1,0 +1,24 @@
+[phases.setup]
+nixPkgs = ['...', 'php81', 'nodejs-18_x']
+nixLibs = ['...']
+nixOverlays = []
+
+[phases.install]
+dependsOn = ['setup']
+cmds = [
+    'curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer',
+    'npm install -g yarn',
+    'composer install --no-dev --optimize-autoloader --no-interaction',
+    'yarn install --production=false',
+    'yarn run production'
+]
+
+[phases.build]
+dependsOn = ['install']
+cmds = [
+    'chmod -R 755 storage',
+    'chmod -R 755 bootstrap/cache'
+]
+
+[start]
+cmd = 'scripts/docker/entrypoint.sh && php artisan serve --host=0.0.0.0 --port=$PORT'

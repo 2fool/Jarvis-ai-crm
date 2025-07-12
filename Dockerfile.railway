@@ -1,9 +1,14 @@
 FROM php:8.1-apache
 
-# Install system dependencies
+# Install system dependencies in smaller batches to avoid conflicts
 RUN apt-get update && apt-get install -y \
     git \
     curl \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install PHP library dependencies
+RUN apt-get update && apt-get install -y \
     libpng-dev \
     libonig-dev \
     libxml2-dev \
@@ -12,25 +17,11 @@ RUN apt-get update && apt-get install -y \
     libgmp-dev \
     libfreetype6-dev \
     libjpeg62-turbo-dev \
-    unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js 18.x
-RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
-    && apt-get install -y nodejs
-
 # Install PHP extensions
-RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install -j$(nproc) \
-        pdo_mysql \
-        mbstring \
-        exif \
-        pcntl \
-        bcmath \
-        gd \
-        zip \
-        intl \
-        gmp
+RUN docker-php-ext-configure gd --with-freetype --with-jpeg
+RUN docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd zip intl gmp
 
 # Install Redis extension
 RUN pecl install redis && docker-php-ext-enable redis
@@ -38,32 +29,41 @@ RUN pecl install redis && docker-php-ext-enable redis
 # Install Composer
 RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 
-# Install Yarn separately to avoid conflicts
-RUN curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | gpg --dearmor | tee /usr/share/keyrings/yarn.gpg >/dev/null \
-    && echo "deb [signed-by=/usr/share/keyrings/yarn.gpg] https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list \
-    && apt-get update \
-    && apt-get install -y yarn \
-    && rm -rf /var/lib/apt/lists/*
+# Install Node.js using NodeSource repository
+RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+RUN apt-get install -y nodejs
+
+# Install Yarn using npm to avoid package conflicts
+RUN npm install -g yarn
 
 # Set working directory
 WORKDIR /var/www/html
 
+# Copy package files first for better caching
+COPY composer.json composer.lock ./
+COPY package.json yarn.lock ./
+
+# Install PHP dependencies
+RUN composer install --no-dev --optimize-autoloader --no-interaction --no-scripts
+
+# Install Node dependencies
+RUN yarn install --production=false --frozen-lockfile
+
 # Copy application files
 COPY . .
 
-# Install PHP dependencies
+# Complete Composer installation with scripts
 RUN composer install --no-dev --optimize-autoloader --no-interaction
 
-# Install Node dependencies and build assets
-RUN yarn install --production=false --network-timeout 100000
+# Build assets
 RUN yarn run production
 
 # Set proper permissions
-RUN chown -R www-data:www-data /var/www/html \
-    && chmod -R 755 /var/www/html/storage \
-    && chmod -R 755 /var/www/html/bootstrap/cache
+RUN chown -R www-data:www-data /var/www/html
+RUN chmod -R 755 /var/www/html/storage
+RUN chmod -R 755 /var/www/html/bootstrap/cache
 
-# Copy custom Apache configuration
+# Configure Apache
 RUN echo '<VirtualHost *:80>\n\
     DocumentRoot /var/www/html/public\n\
     <Directory /var/www/html/public>\n\
@@ -81,9 +81,9 @@ RUN a2enmod rewrite
 COPY scripts/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# Expose port 80
+# Expose port
 EXPOSE 80
 
-# Set the entrypoint
+# Set entrypoint
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["apache2-foreground"]
