@@ -1,0 +1,135 @@
+FROM php:8.2-apache
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    git curl unzip zip \
+    libpng-dev libonig-dev libxml2-dev libzip-dev \
+    libicu-dev libgmp-dev libfreetype6-dev libjpeg62-turbo-dev \
+    netcat-traditional supervisor \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install PHP extensions
+RUN docker-php-ext-configure gd --with-freetype --with-jpeg && \
+    docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd zip intl gmp && \
+    pecl install redis && docker-php-ext-enable redis
+
+# Install Composer
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+
+# Install Node.js 20.x and Yarn
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    npm install -g yarn@1.22
+
+WORKDIR /var/www/html
+
+# Copy files
+COPY . .
+
+# Remove problematic dev dependency
+RUN composer remove roave/security-advisories --dev --no-interaction --no-update 2>/dev/null || true
+
+# Install PHP dependencies
+RUN composer install --no-dev --optimize-autoloader --no-interaction --ignore-platform-reqs
+
+# Setup environment
+RUN cp .env.example .env
+
+# Generate language files with proper database setup
+RUN echo "DB_CONNECTION=sqlite" >> .env && \
+    echo "DB_DATABASE=/tmp/build.sqlite" >> .env && \
+    touch /tmp/build.sqlite && \
+    php artisan key:generate --no-interaction && \
+    php artisan migrate --no-interaction --force 2>/dev/null || true && \
+    php artisan lang:generate -v 2>/dev/null || \
+    (mkdir -p public/js/langs && \
+     cp resources/lang/en.json public/js/langs/en.json 2>/dev/null || \
+     echo '{}' > public/js/langs/en.json)
+
+# Install Node dependencies and build
+RUN yarn install --frozen-lockfile --network-timeout 300000
+RUN yarn run production
+
+# Clean up build database
+RUN rm -f /tmp/build.sqlite
+
+# Reset environment for runtime
+RUN cp .env.example .env && \
+    php artisan key:generate --no-interaction
+
+# Configure Laravel for production
+RUN php artisan config:cache --no-interaction || true && \
+    php artisan route:cache --no-interaction || true && \
+    php artisan view:cache --no-interaction || true
+
+# Set permissions
+RUN chown -R www-data:www-data /var/www/html && \
+    chmod -R 755 storage bootstrap/cache && \
+    chmod -R 775 storage
+
+# Configure Apache for Railway
+RUN echo 'ServerName localhost' >> /etc/apache2/apache2.conf && \
+    echo 'Listen ${PORT:-80}' >> /etc/apache2/ports.conf
+
+# Create Apache vhost that works with Railway
+RUN echo '<VirtualHost *:${PORT:-80}>\n\
+    DocumentRoot /var/www/html/public\n\
+    ServerName localhost\n\
+    <Directory /var/www/html/public>\n\
+        AllowOverride All\n\
+        Require all granted\n\
+        Options -Indexes\n\
+    </Directory>\n\
+    ErrorLog ${APACHE_LOG_DIR}/error.log\n\
+    CustomLog ${APACHE_LOG_DIR}/access.log combined\n\
+    LogLevel info\n\
+</VirtualHost>' > /etc/apache2/sites-available/000-default.conf
+
+# Enable Apache modules
+RUN a2enmod rewrite headers
+
+# Create startup script for Railway
+RUN echo '#!/bin/bash\n\
+set -e\n\
+\n\
+echo "Starting Monica CRM..."\n\
+\n\
+# Create required directories\n\
+mkdir -p storage/logs storage/app/public storage/framework/{views,cache,sessions}\n\
+chown -R www-data:www-data storage bootstrap/cache\n\
+chmod -R 775 storage bootstrap/cache\n\
+\n\
+# Generate app key if not set\n\
+if [ -z "${APP_KEY}" ] || [ "${APP_KEY}" = "ChangeMeBy32KeyLengthOrGenerated" ]; then\n\
+    echo "Generating application key..."\n\
+    php artisan key:generate --no-interaction --force\n\
+fi\n\
+\n\
+# Create storage link\n\
+php artisan storage:link 2>/dev/null || true\n\
+\n\
+# Run database migrations if database is configured\n\
+if [ -n "${DB_HOST}" ] && [ -n "${DB_DATABASE}" ]; then\n\
+    echo "Running database setup..."\n\
+    php artisan migrate --no-interaction --force || echo "Migration failed, continuing..."\n\
+    \n\
+    # Generate Passport keys if needed\n\
+    if [ ! -f "storage/oauth-public.key" ]; then\n\
+        php artisan passport:keys --no-interaction || echo "Passport setup failed, continuing..."\n\
+        php artisan passport:client --personal --no-interaction || echo "Passport client failed, continuing..."\n\
+    fi\n\
+fi\n\
+\n\
+echo "Monica CRM startup complete. Starting Apache..."\n\
+\n\
+# Start Apache in foreground\n\
+exec apache2-foreground' > /usr/local/bin/start-monica.sh && \
+    chmod +x /usr/local/bin/start-monica.sh
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-80}/ || exit 1
+
+EXPOSE ${PORT:-80}
+
+CMD ["/usr/local/bin/start-monica.sh"]

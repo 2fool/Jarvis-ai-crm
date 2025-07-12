@@ -1,11 +1,13 @@
 [build]
 builder = "dockerfile"
-dockerfilePath = "Dockerfile.production"
+dockerfilePath = "Dockerfile.railway-fixed"
 
 [deploy]
-startCommand = "apache2-foreground"
 healthcheckPath = "/"
 healthcheckTimeout = 300
 
 [env]
-NIXPACKS_IGNORE_FILE_CONFLICTS = "true"
+APP_ENV = "production"
+APP_DEBUG = "false"
+LOG_CHANNEL = "stderr"
+LOG_LEVEL = "info"
