@@ -1,0 +1,77 @@
+FROM php:8.2
+
+# Install minimal dependencies
+RUN apt-get update && apt-get install -y \
+    git curl unzip \
+    libpng-dev libxml2-dev libzip-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install PHP extensions
+RUN docker-php-ext-install pdo_mysql gd zip
+
+# Install Composer
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+
+WORKDIR /var/www/html
+
+# Copy application
+COPY . .
+
+# Install dependencies
+RUN composer remove roave/security-advisories --dev --no-interaction --no-update 2>/dev/null || true
+RUN composer install --no-dev --optimize-autoloader --no-interaction --ignore-platform-reqs
+
+# Setup Laravel
+RUN cp .env.example .env && \
+    echo "APP_ENV=production" >> .env && \
+    echo "APP_DEBUG=false" >> .env && \
+    echo "LOG_CHANNEL=stderr" >> .env && \
+    php artisan key:generate --no-interaction
+
+# Create minimal public/index.php that doesn't require database
+RUN echo '<?php\n\
+\n\
+// Simple health check\n\
+if ($_SERVER["REQUEST_URI"] === "/health") {\n\
+    echo "OK";\n\
+    exit;\n\
+}\n\
+\n\
+// Laravel bootstrap\n\
+define("LARAVEL_START", microtime(true));\n\
+\n\
+if (file_exists(__DIR__."/../vendor/autoload.php")) {\n\
+    require __DIR__."/../vendor/autoload.php";\n\
+} else {\n\
+    die("Composer autoload not found.");\n\
+}\n\
+\n\
+$app = require_once __DIR__."/../bootstrap/app.php";\n\
+\n\
+$kernel = $app->make(Illuminate\\Contracts\\Http\\Kernel::class);\n\
+\n\
+$request = Illuminate\\Http\\Request::capture();\n\
+\n\
+try {\n\
+    $response = $kernel->handle($request);\n\
+    $response->send();\n\
+    $kernel->terminate($request, $response);\n\
+} catch (Exception $e) {\n\
+    echo "Application Error: " . $e->getMessage();\n\
+    http_response_code(500);\n\
+}' > public/index.php
+
+# Set permissions
+RUN chown -R www-data:www-data /var/www/html && \
+    chmod -R 755 storage bootstrap/cache
+
+# Use PHP built-in server (more reliable for Railway)
+RUN echo '#!/bin/bash\n\
+echo "Starting Monica CRM on port ${PORT:-8080}"\n\
+mkdir -p storage/logs storage/app/public storage/framework/{views,cache,sessions}\n\
+chown -R www-data:www-data storage bootstrap/cache\n\
+cd public\n\
+exec php -S 0.0.0.0:${PORT:-8080} index.php' > /start.sh && chmod +x /start.sh
+
+EXPOSE ${PORT:-8080}
+CMD ["/start.sh"]

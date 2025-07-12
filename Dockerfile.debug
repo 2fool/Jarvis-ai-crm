@@ -1,0 +1,102 @@
+FROM php:8.2-apache
+
+# Install minimal dependencies
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
+# Install essential PHP extensions only
+RUN docker-php-ext-install pdo_mysql
+
+# Install Composer
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+
+WORKDIR /var/www/html
+
+# Copy only essential files
+COPY composer.json composer.lock ./
+COPY app ./app
+COPY config ./config
+COPY public ./public
+COPY resources ./resources
+COPY routes ./routes
+COPY bootstrap ./bootstrap
+COPY storage ./storage
+COPY .env.example ./
+
+# Install PHP dependencies with minimal requirements
+RUN composer install --no-dev --optimize-autoloader --no-interaction --ignore-platform-reqs
+
+# Set up basic Laravel environment
+RUN cp .env.example .env && \
+    echo "APP_ENV=production" >> .env && \
+    echo "APP_DEBUG=false" >> .env && \
+    echo "LOG_CHANNEL=stderr" >> .env && \
+    echo "DB_CONNECTION=sqlite" >> .env && \
+    echo "DB_DATABASE=/tmp/app.sqlite" >> .env && \
+    touch /tmp/app.sqlite && \
+    php artisan key:generate --no-interaction
+
+# Create a simple test endpoint
+RUN echo '<?php\n\
+error_reporting(E_ALL);\n\
+ini_set("display_errors", 1);\n\
+\n\
+echo "Monica CRM Debug Info:<br>";\n\
+echo "PHP Version: " . PHP_VERSION . "<br>";\n\
+echo "Server Port: " . ($_ENV["PORT"] ?? "80") . "<br>";\n\
+echo "Document Root: " . $_SERVER["DOCUMENT_ROOT"] . "<br>";\n\
+echo "Current Time: " . date("Y-m-d H:i:s") . "<br>";\n\
+echo "Laravel Version: ";\n\
+\n\
+try {\n\
+    require_once __DIR__ . "/../vendor/autoload.php";\n\
+    $app = require_once __DIR__ . "/../bootstrap/app.php";\n\
+    echo $app->version() . "<br>";\n\
+    echo "Laravel Status: OK<br>";\n\
+} catch (Exception $e) {\n\
+    echo "Laravel Error: " . $e->getMessage() . "<br>";\n\
+}\n\
+\n\
+echo "Environment Variables:<br>";\n\
+foreach (["PORT", "APP_KEY", "APP_ENV", "DB_CONNECTION"] as $var) {\n\
+    echo "$var: " . ($_ENV[$var] ?? "not set") . "<br>";\n\
+}' > public/debug.php
+
+# Simple Apache configuration for Railway
+RUN echo 'ServerName localhost' >> /etc/apache2/apache2.conf
+RUN echo 'Listen ${PORT:-80}' > /etc/apache2/ports.conf
+
+RUN echo '<VirtualHost *:${PORT:-80}>\n\
+    DocumentRoot /var/www/html/public\n\
+    <Directory /var/www/html/public>\n\
+        AllowOverride All\n\
+        Require all granted\n\
+    </Directory>\n\
+    ErrorLog /dev/stderr\n\
+    CustomLog /dev/stdout combined\n\
+</VirtualHost>' > /etc/apache2/sites-available/000-default.conf
+
+RUN a2enmod rewrite
+
+# Set minimal permissions
+RUN chown -R www-data:www-data /var/www/html && \
+    chmod -R 755 storage bootstrap/cache
+
+# Simple startup with logging
+RUN echo '#!/bin/bash\n\
+set -e\n\
+echo "=== Monica CRM Debug Startup ==="\n\
+echo "PORT: ${PORT:-80}"\n\
+echo "PWD: $(pwd)"\n\
+echo "User: $(whoami)"\n\
+echo "PHP Version: $(php -v | head -1)"\n\
+\n\
+# Test Apache config\n\
+echo "Testing Apache configuration..."\n\
+apache2ctl configtest\n\
+\n\
+# Start Apache with logging\n\
+echo "Starting Apache..."\n\
+exec apache2-foreground' > /start.sh && chmod +x /start.sh
+
+EXPOSE ${PORT:-80}
+CMD ["/start.sh"]
