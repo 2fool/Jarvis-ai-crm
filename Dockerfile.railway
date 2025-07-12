@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y \
     git \
     curl \
     unzip \
+    jq \
     netcat-traditional \
     libpng-dev \
     libonig-dev \
@@ -42,10 +43,13 @@ RUN npm install -g yarn --timeout=60000
 WORKDIR /var/www/html
 
 # Copy package files first for better caching
-COPY composer.json ./
+COPY composer.json composer.json.orig
 COPY package.json yarn.lock ./
 
-# Install PHP dependencies without lock file to resolve version conflicts
+# Remove problematic roave/security-advisories from composer.json for production build
+RUN jq 'del(."require-dev"."roave/security-advisories")' composer.json.orig > composer.json
+
+# Install PHP dependencies without problematic dev dependencies
 RUN composer install --no-dev --optimize-autoloader --no-interaction --no-scripts
 
 # Install Node dependencies
