@@ -6,7 +6,6 @@ dockerfilePath = "Dockerfile.railway"
 startCommand = "/usr/local/bin/entrypoint.sh apache2-foreground"
 healthcheckPath = "/"
 healthcheckTimeout = 300
-restartPolicyType = "on-failure"
 
 [env]
 NIXPACKS_IGNORE_FILE_CONFLICTS = "true"
