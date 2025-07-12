@@ -1,6 +1,6 @@
 [build]
 builder = "dockerfile"
-dockerfilePath = "Dockerfile.minimal"
+dockerfilePath = "Dockerfile.production"
 
 [deploy]
 startCommand = "apache2-foreground"

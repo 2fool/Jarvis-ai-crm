@@ -32,21 +32,30 @@ RUN composer remove roave/security-advisories --dev --no-interaction --no-update
 # Install PHP dependencies
 RUN composer install --no-dev --optimize-autoloader --no-interaction --ignore-platform-reqs
 
-# Setup basic environment
+# Setup basic environment for Laravel commands
 RUN cp .env.example .env && \
     php artisan key:generate --no-interaction
 
-# Generate required language JSON files for webpack
-# Create the directory structure and copy existing JSON files
-RUN mkdir -p public/js/langs && \
-    cp resources/lang/en.json public/js/langs/en.json 2>/dev/null || \
-    echo '{}' > public/js/langs/en.json
+# Create minimal database configuration for lang:generate
+RUN echo "DB_CONNECTION=sqlite" >> .env && \
+    echo "DB_DATABASE=/tmp/database.sqlite" >> .env && \
+    touch /tmp/database.sqlite && \
+    php artisan migrate --no-interaction --force 2>/dev/null || true
+
+# Generate language files
+RUN php artisan lang:generate -v || \
+    (mkdir -p public/js/langs && \
+     cp resources/lang/en.json public/js/langs/en.json 2>/dev/null || \
+     echo '{}' > public/js/langs/en.json)
 
 # Install Node dependencies
 RUN yarn install --frozen-lockfile --network-timeout 300000
 
-# Build assets directly with mix (bypass yarn scripts)
-RUN npx mix --production
+# Build assets
+RUN yarn run production
+
+# Clean up temp database
+RUN rm -f /tmp/database.sqlite
 
 # Complete Laravel setup
 RUN php artisan config:cache && \
