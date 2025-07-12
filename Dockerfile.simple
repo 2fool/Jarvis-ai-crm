@@ -1,0 +1,58 @@
+FROM php:8.2-apache
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    git curl unzip zip \
+    libpng-dev libonig-dev libxml2-dev libzip-dev \
+    libicu-dev libgmp-dev libfreetype6-dev libjpeg62-turbo-dev \
+    netcat-traditional \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install PHP extensions
+RUN docker-php-ext-configure gd --with-freetype --with-jpeg && \
+    docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd zip intl gmp && \
+    pecl install redis && docker-php-ext-enable redis
+
+# Install Composer
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+
+# Install Node.js and Yarn
+RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
+    apt-get install -y nodejs && \
+    npm install -g yarn
+
+WORKDIR /var/www/html
+
+# Copy files
+COPY . .
+
+# Skip problematic packages
+RUN composer config --global repos.packagist composer https://packagist.org && \
+    composer remove roave/security-advisories --dev --no-interaction --no-update 2>/dev/null || true
+
+# Install dependencies
+RUN composer install --no-dev --optimize-autoloader --no-interaction --ignore-platform-reqs
+
+# Build assets
+RUN yarn install && yarn run production
+
+# Setup Laravel
+RUN cp .env.example .env || true && \
+    php artisan key:generate --no-interaction && \
+    php artisan config:cache && \
+    php artisan storage:link || true
+
+# Set permissions
+RUN chown -R www-data:www-data /var/www/html && \
+    chmod -R 755 storage bootstrap/cache
+
+# Apache config
+RUN echo 'DocumentRoot /var/www/html/public\n\
+<Directory /var/www/html/public>\n\
+    AllowOverride All\n\
+    Require all granted\n\
+</Directory>' > /etc/apache2/sites-available/000-default.conf && \
+    a2enmod rewrite
+
+EXPOSE 80
+CMD ["apache2-foreground"]

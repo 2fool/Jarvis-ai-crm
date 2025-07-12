@@ -1,0 +1,121 @@
+FROM php:8.2-apache
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    unzip \
+    zip \
+    libpng-dev \
+    libonig-dev \
+    libxml2-dev \
+    libzip-dev \
+    libicu-dev \
+    libgmp-dev \
+    libfreetype6-dev \
+    libjpeg62-turbo-dev \
+    netcat-traditional \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install PHP extensions
+RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
+    && docker-php-ext-install -j$(nproc) \
+        pdo_mysql \
+        mbstring \
+        exif \
+        pcntl \
+        bcmath \
+        gd \
+        zip \
+        intl \
+        gmp
+
+# Install Redis extension
+RUN pecl install redis && docker-php-ext-enable redis
+
+# Install Composer directly
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+
+# Install Node.js 18
+RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
+    && apt-get install -y nodejs
+
+# Install Yarn
+RUN npm install -g yarn
+
+# Set working directory
+WORKDIR /var/www/html
+
+# Copy application files
+COPY . .
+
+# Create a simplified composer.json for production
+RUN php -r "
+\$composer = json_decode(file_get_contents('composer.json'), true);
+unset(\$composer['require-dev']);
+\$composer['config']['platform-check'] = false;
+file_put_contents('composer-prod.json', json_encode(\$composer, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+"
+
+# Install PHP dependencies using simplified composer.json
+RUN mv composer-prod.json composer.json \
+    && composer install --no-dev --optimize-autoloader --no-interaction
+
+# Install Node dependencies and build
+RUN yarn install --production=false
+RUN yarn run production
+
+# Set up Laravel
+RUN php artisan config:cache || true
+RUN php artisan route:cache || true
+RUN php artisan view:cache || true
+
+# Set permissions
+RUN chown -R www-data:www-data /var/www/html \
+    && chmod -R 755 /var/www/html/storage \
+    && chmod -R 755 /var/www/html/bootstrap/cache
+
+# Configure Apache
+RUN echo '<VirtualHost *:80>\n\
+    DocumentRoot /var/www/html/public\n\
+    <Directory /var/www/html/public>\n\
+        AllowOverride All\n\
+        Require all granted\n\
+    </Directory>\n\
+    ErrorLog ${APACHE_LOG_DIR}/error.log\n\
+    CustomLog ${APACHE_LOG_DIR}/access.log combined\n\
+</VirtualHost>' > /etc/apache2/sites-available/000-default.conf
+
+# Enable Apache modules
+RUN a2enmod rewrite
+
+# Create startup script
+RUN echo '#!/bin/bash\n\
+set -e\n\
+\n\
+# Create storage directories\n\
+mkdir -p storage/logs storage/app/public storage/framework/{views,cache,sessions}\n\
+chown -R www-data:www-data storage bootstrap/cache\n\
+chmod -R 775 storage bootstrap/cache\n\
+\n\
+# Generate app key if not set\n\
+if [ -z "${APP_KEY}" ]; then\n\
+    php artisan key:generate --no-interaction\n\
+fi\n\
+\n\
+# Create storage link\n\
+php artisan storage:link || true\n\
+\n\
+# Generate Passport keys if needed\n\
+if [ ! -f "storage/oauth-public.key" ]; then\n\
+    php artisan passport:keys || true\n\
+    php artisan passport:client --personal --no-interaction || true\n\
+fi\n\
+\n\
+# Start Apache\n\
+exec apache2-foreground' > /usr/local/bin/start.sh \
+    && chmod +x /usr/local/bin/start.sh
+
+EXPOSE 80
+
+CMD ["/usr/local/bin/start.sh"]

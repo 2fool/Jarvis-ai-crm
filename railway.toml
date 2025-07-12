@@ -1,9 +1,9 @@
 [build]
 builder = "dockerfile"
-dockerfilePath = "Dockerfile.railway"
+dockerfilePath = "Dockerfile.simple"
 
 [deploy]
-startCommand = "/usr/local/bin/entrypoint.sh apache2-foreground"
+startCommand = "apache2-foreground"
 healthcheckPath = "/"
 healthcheckTimeout = 300
 
