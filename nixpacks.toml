@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ['...', 'php81', 'nodejs-18_x']
+nixPkgs = ['...', 'php82', 'nodejs-18_x']
 nixLibs = ['...']
 nixOverlays = []
 

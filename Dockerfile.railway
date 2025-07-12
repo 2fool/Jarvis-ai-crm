@@ -1,4 +1,4 @@
-FROM php:8.1-apache
+FROM php:8.2-apache
 
 # Install system dependencies in one step to reduce layers and network issues
 RUN apt-get update && apt-get install -y \
@@ -42,10 +42,10 @@ RUN npm install -g yarn --timeout=60000
 WORKDIR /var/www/html
 
 # Copy package files first for better caching
-COPY composer.json composer.lock ./
+COPY composer.json ./
 COPY package.json yarn.lock ./
 
-# Install PHP dependencies
+# Install PHP dependencies without lock file to resolve version conflicts
 RUN composer install --no-dev --optimize-autoloader --no-interaction --no-scripts
 
 # Install Node dependencies
