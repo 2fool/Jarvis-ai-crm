@@ -16,7 +16,7 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg && \
 # Install Composer
 RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 
-# Install Node.js 20.x and Yarn (as required by package.json)
+# Install Node.js 20.x and Yarn
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
     npm install -g yarn@1.22
@@ -26,20 +26,25 @@ WORKDIR /var/www/html
 # Copy files
 COPY . .
 
-# Skip problematic packages
-RUN composer config --global repos.packagist composer https://packagist.org && \
-    composer remove roave/security-advisories --dev --no-interaction --no-update 2>/dev/null || true
+# Remove problematic dev dependency
+RUN composer remove roave/security-advisories --dev --no-interaction --no-update 2>/dev/null || true
 
-# Install dependencies
+# Install PHP dependencies
 RUN composer install --no-dev --optimize-autoloader --no-interaction --ignore-platform-reqs
 
-# Setup basic Laravel environment first (needed for lang:generate)
-RUN cp .env.example .env || true && \
+# Setup basic environment
+RUN cp .env.example .env && \
     php artisan key:generate --no-interaction
 
-# Build assets with proper Laravel environment
-RUN yarn install --frozen-lockfile --network-timeout 300000 && \
-    yarn run production --no-progress
+# Create empty language file to skip lang:generate
+RUN mkdir -p public/js && \
+    echo 'window.messages = {};' > public/js/lang.js
+
+# Install Node dependencies
+RUN yarn install --frozen-lockfile --network-timeout 300000
+
+# Build assets directly with mix (bypass yarn scripts)
+RUN npx mix --production
 
 # Complete Laravel setup
 RUN php artisan config:cache && \
@@ -50,11 +55,13 @@ RUN chown -R www-data:www-data /var/www/html && \
     chmod -R 755 storage bootstrap/cache
 
 # Apache config
-RUN echo 'DocumentRoot /var/www/html/public\n\
-<Directory /var/www/html/public>\n\
-    AllowOverride All\n\
-    Require all granted\n\
-</Directory>' > /etc/apache2/sites-available/000-default.conf && \
+RUN echo '<VirtualHost *:80>\n\
+    DocumentRoot /var/www/html/public\n\
+    <Directory /var/www/html/public>\n\
+        AllowOverride All\n\
+        Require all granted\n\
+    </Directory>\n\
+</VirtualHost>' > /etc/apache2/sites-available/000-default.conf && \
     a2enmod rewrite
 
 EXPOSE 80
