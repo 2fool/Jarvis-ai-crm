@@ -4,7 +4,13 @@ set -Eeo pipefail
 
 # wait for the database to start
 waitfordb() {
-    HOST=${DB_HOST:-mysql}
+    # Skip database wait if DB_HOST is not set (for Railway deployment)
+    if [ -z "${DB_HOST:-}" ]; then
+        echo "DB_HOST not set, skipping database connection check"
+        return 0
+    fi
+
+    HOST=${DB_HOST}
     PORT=${DB_PORT:-3306}
     echo "Connecting to ${HOST}:${PORT}"
 
@@ -47,9 +53,17 @@ if expr "$1" : "apache" 1>/dev/null || [ "$1" = "php-fpm" ]; then
         echo "APP_KEY already set"
     fi
 
-    # Run migrations
+    # Run migrations only if database is available
     waitfordb
-    ${ARTISAN} monica:update --force -vv
+    if [ -n "${DB_HOST:-}" ]; then
+        ${ARTISAN} monica:update --force -vv
+    else
+        echo "Database not configured, skipping migrations"
+        # Generate storage link if it doesn't exist
+        if [ ! -L "${MONICADIR}/public/storage" ]; then
+            ${ARTISAN} storage:link
+        fi
+    fi
 
     if [ ! -f "${STORAGE}/oauth-public.key" -o ! -f "${STORAGE}/oauth-private.key" ]; then
         echo "Passport keys creation ..."
