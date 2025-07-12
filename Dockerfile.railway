@@ -1,14 +1,11 @@
 FROM php:8.1-apache
 
-# Install system dependencies in smaller batches to avoid conflicts
+# Install system dependencies in one step to reduce layers and network issues
 RUN apt-get update && apt-get install -y \
     git \
     curl \
     unzip \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install PHP library dependencies
-RUN apt-get update && apt-get install -y \
+    netcat-traditional \
     libpng-dev \
     libonig-dev \
     libxml2-dev \
@@ -17,7 +14,10 @@ RUN apt-get update && apt-get install -y \
     libgmp-dev \
     libfreetype6-dev \
     libjpeg62-turbo-dev \
-    && rm -rf /var/lib/apt/lists/*
+    ca-certificates \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
 # Install PHP extensions
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg
@@ -26,15 +26,17 @@ RUN docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd zip intl gmp
 # Install Redis extension
 RUN pecl install redis && docker-php-ext-enable redis
 
-# Install Composer
-RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+# Install Composer with retry mechanism
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer \
+    || (sleep 5 && curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer)
 
-# Install Node.js using NodeSource repository
-RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
-RUN apt-get install -y nodejs
+# Install Node.js using NodeSource repository with retry
+RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
+    || (sleep 5 && curl -fsSL https://deb.nodesource.com/setup_18.x | bash -)
+RUN apt-get update && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*
 
-# Install Yarn using npm to avoid package conflicts
-RUN npm install -g yarn
+# Install Yarn using npm
+RUN npm install -g yarn --timeout=60000
 
 # Set working directory
 WORKDIR /var/www/html
@@ -51,6 +53,69 @@ RUN yarn install --production=false --frozen-lockfile
 
 # Copy application files
 COPY . .
+
+# Create entrypoint script inline to avoid copy issues
+RUN echo '#!/bin/bash\n\
+set -Eeo pipefail\n\
+\n\
+waitfordb() {\n\
+    if [ -z "${DB_HOST:-}" ]; then\n\
+        echo "DB_HOST not set, skipping database connection check"\n\
+        return 0\n\
+    fi\n\
+    HOST=${DB_HOST}\n\
+    PORT=${DB_PORT:-3306}\n\
+    echo "Connecting to ${HOST}:${PORT}"\n\
+    attempts=0\n\
+    max_attempts=30\n\
+    while [ $attempts -lt $max_attempts ]; do\n\
+        nc -z "${HOST}" "${PORT}" && break\n\
+        echo "Waiting for ${HOST}:${PORT}..."\n\
+        sleep 1\n\
+        let "attempts=attempts+1"\n\
+    done\n\
+    if [ $attempts -eq $max_attempts ]; then\n\
+        echo "Unable to contact your database at ${HOST}:${PORT}"\n\
+        exit 1\n\
+    fi\n\
+    echo "Waiting for database to settle..."\n\
+    sleep 3\n\
+}\n\
+\n\
+if expr "$1" : "apache" 1>/dev/null || [ "$1" = "php-fpm" ]; then\n\
+    MONICADIR=/var/www/html\n\
+    ARTISAN="php ${MONICADIR}/artisan"\n\
+    STORAGE=${MONICADIR}/storage\n\
+    mkdir -p ${STORAGE}/logs\n\
+    mkdir -p ${STORAGE}/app/public\n\
+    mkdir -p ${STORAGE}/framework/views\n\
+    mkdir -p ${STORAGE}/framework/cache\n\
+    mkdir -p ${STORAGE}/framework/sessions\n\
+    chown -R www-data:www-data ${STORAGE}\n\
+    chmod -R g+rw ${STORAGE}\n\
+    if [ -z "${APP_KEY:-}" -o "$APP_KEY" = "ChangeMeBy32KeyLengthOrGenerated" ]; then\n\
+        ${ARTISAN} key:generate --no-interaction\n\
+    else\n\
+        echo "APP_KEY already set"\n\
+    fi\n\
+    waitfordb\n\
+    if [ -n "${DB_HOST:-}" ]; then\n\
+        ${ARTISAN} monica:update --force -vv\n\
+    else\n\
+        echo "Database not configured, skipping migrations"\n\
+        if [ ! -L "${MONICADIR}/public/storage" ]; then\n\
+            ${ARTISAN} storage:link\n\
+        fi\n\
+    fi\n\
+    if [ ! -f "${STORAGE}/oauth-public.key" -o ! -f "${STORAGE}/oauth-private.key" ]; then\n\
+        echo "Passport keys creation ..."\n\
+        ${ARTISAN} passport:keys\n\
+        ${ARTISAN} passport:client --personal --no-interaction\n\
+        echo "! Please be careful to backup $MONICADIR/storage/oauth-public.key and $MONICADIR/storage/oauth-private.key files !"\n\
+    fi\n\
+fi\n\
+exec "$@"' > /usr/local/bin/entrypoint.sh \
+    && chmod +x /usr/local/bin/entrypoint.sh
 
 # Complete Composer installation with scripts
 RUN composer install --no-dev --optimize-autoloader --no-interaction
@@ -76,10 +141,6 @@ RUN echo '<VirtualHost *:80>\n\
 
 # Enable Apache rewrite module
 RUN a2enmod rewrite
-
-# Copy entrypoint script
-COPY scripts/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Expose port
 EXPOSE 80
